@@ -4,7 +4,7 @@ import { useMarketData } from "@/hooks/useMarketData";
 import Dashboard from "@/components/Dashboard";
 
 export default function Home() {
-  const { data, isLoading, isError, refresh } = useMarketData();
+  const { data, isLoading, isError, errorMessage, dataSource, refresh } = useMarketData();
 
   if (isError) {
     return (
@@ -39,5 +39,13 @@ export default function Home() {
     );
   }
 
-  return <Dashboard data={data} isLoading={isLoading} onRefresh={refresh} />;
+  return (
+    <Dashboard
+      data={data}
+      isLoading={isLoading}
+      dataSource={dataSource}
+      apiWarning={errorMessage ?? undefined}
+      onRefresh={refresh}
+    />
+  );
 }

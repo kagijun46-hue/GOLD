@@ -2,13 +2,17 @@
 // XAUUSD Trading Assistant - useMarketData Hook
 // ===================================================================
 // このフックがデータ取得の唯一の窓口です。
-// 実APIに接続する場合はこのファイルの fetchLiveData 関数を実装してください。
-// フロントエンドのコンポーネントは一切変更不要です。
+//
+// ダミーモード: NEXT_PUBLIC_USE_DUMMY_DATA=true（デフォルト）
+// 実APIモード:  NEXT_PUBLIC_USE_DUMMY_DATA=false + TWELVE_DATA_API_KEY設定
+//
+// 実APIモードでは /api/market-data ルートを経由してサーバーサイドで
+// Twelve Data APIを呼び出します。APIキーはサーバー側のみに存在します。
 // ===================================================================
 
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { AnalysisResult, MarketData, TimeframeTrend } from "@/types";
 import {
   DUMMY_MARKET_DATA,
@@ -22,16 +26,17 @@ import { generateScenarios } from "@/lib/scenario";
 import { evaluateEntryConditions } from "@/lib/entrySignal";
 import { generateNotifications } from "@/lib/notification";
 import { buildAnalysisResult, determineOverallJudgment } from "@/lib/summary";
+import type { MarketDataApiResponse } from "@/lib/api/transform";
 
 // ---------------------------------------------------------------
 // 設定
 // ---------------------------------------------------------------
 
-/** ダミーデータを使用するかどうか（.envで制御可能） */
+/** ダミーデータを使用するかどうか（.envで制御） */
 const USE_DUMMY = process.env.NEXT_PUBLIC_USE_DUMMY_DATA !== "false";
 
 /** データ自動更新間隔（秒）*/
-const REFRESH_INTERVAL = parseInt(
+const REFRESH_INTERVAL_SEC = parseInt(
   process.env.NEXT_PUBLIC_REFRESH_INTERVAL ?? "60",
   10
 );
@@ -40,11 +45,12 @@ const REFRESH_INTERVAL = parseInt(
 // フック戻り値の型
 // ---------------------------------------------------------------
 
-interface UseMarketDataResult {
+export interface UseMarketDataResult {
   data: AnalysisResult | null;
   isLoading: boolean;
   isError: boolean;
   errorMessage: string | null;
+  dataSource: "live" | "dummy" | "partial" | null;
   refresh: () => void;
   lastUpdated: string | null;
 }
@@ -58,9 +64,17 @@ export function useMarketData(): UseMarketDataResult {
   const [isLoading, setIsLoading] = useState(true);
   const [isError, setIsError] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [dataSource, setDataSource] = useState<"live" | "dummy" | "partial" | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
+  // AbortController を ref で管理（クリーンアップ用）
+  const abortRef = useRef<AbortController | null>(null);
+
   const fetchData = useCallback(async () => {
+    // 前回のフェッチをキャンセル
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+
     setIsLoading(true);
     setIsError(false);
     setErrorMessage(null);
@@ -68,23 +82,41 @@ export function useMarketData(): UseMarketDataResult {
     try {
       let marketData: MarketData;
       let timeframeTrends: TimeframeTrend[];
+      let source: "live" | "dummy" | "partial" = "dummy";
 
       if (USE_DUMMY) {
-        // ダミーデータを使用（APIなしで動作確認可能）
-        await simulateDelay(300); // リアルな読み込み感のため
-        marketData = {
-          ...DUMMY_MARKET_DATA,
-          updatedAt: new Date().toISOString(),
-        };
+        // ─── ダミーモード ───────────────────────────────────
+        await simulateDelay(300);
+        marketData = { ...DUMMY_MARKET_DATA, updatedAt: new Date().toISOString() };
         timeframeTrends = DUMMY_TIMEFRAME_TRENDS;
+        source = "dummy";
       } else {
-        // 実APIへの接続（将来実装）
-        const result = await fetchLiveData();
-        marketData = result.marketData;
-        timeframeTrends = result.timeframeTrends;
+        // ─── 実APIモード（/api/market-data 経由）──────────────
+        const response = await fetch("/api/market-data", {
+          signal: abortRef.current.signal,
+          headers: { "Cache-Control": "no-cache" },
+        });
+
+        if (!response.ok) {
+          throw new Error(`APIルートエラー: ${response.status} ${response.statusText}`);
+        }
+
+        const apiResult: MarketDataApiResponse = await response.json();
+
+        if (apiResult.error) {
+          // サーバー側でエラーが発生したがダミーデータで返ってきた場合
+          console.warn("[useMarketData] API returned error with fallback:", apiResult.error);
+          setErrorMessage(`データ取得エラー（ダミーデータ表示中）: ${apiResult.error}`);
+        }
+
+        marketData = apiResult.marketData;
+        timeframeTrends = apiResult.timeframeTrends;
+        source = apiResult.source;
       }
 
-      // ===== 分析ロジックの実行 =====
+      // ─── 分析ロジック実行（マクロはダミー固定）──────────────
+      // NOTE: マクロ要因（DXY方向感・地政学）は実データと連携済み
+      //       ただしマクロ要因の文章はダミー固定。将来はAPI経由で動的化可能。
       const macroScore = calculateMacroScore(DUMMY_MACRO_FACTORS);
       const trendPattern = classifyTrendPattern(timeframeTrends);
 
@@ -126,9 +158,15 @@ export function useMarketData(): UseMarketDataResult {
       });
 
       setData(analysisResult);
+      setDataSource(source);
       setLastUpdated(new Date().toISOString());
     } catch (error) {
-      console.error("Market data fetch failed:", error);
+      // AbortErrorはユーザー操作によるキャンセルなので無視
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
+
+      console.error("[useMarketData] Fetch failed:", error);
       setIsError(true);
       setErrorMessage(
         error instanceof Error ? error.message : "データ取得に失敗しました"
@@ -141,57 +179,24 @@ export function useMarketData(): UseMarketDataResult {
   // 初回フェッチ
   useEffect(() => {
     fetchData();
+    return () => abortRef.current?.abort();
   }, [fetchData]);
 
-  // 自動更新（インターバル）
+  // 自動更新
   useEffect(() => {
-    const interval = setInterval(fetchData, REFRESH_INTERVAL * 1000);
+    const interval = setInterval(fetchData, REFRESH_INTERVAL_SEC * 1000);
     return () => clearInterval(interval);
-  }, [fetchData, REFRESH_INTERVAL]);
+  }, [fetchData]);
 
   return {
     data,
     isLoading,
     isError,
     errorMessage,
+    dataSource,
     refresh: fetchData,
     lastUpdated,
   };
-}
-
-// ---------------------------------------------------------------
-// 実APIデータ取得（将来実装）
-// ---------------------------------------------------------------
-
-/**
- * 実際のAPIからデータを取得する関数
- * 接続先APIに応じて以下を実装する:
- *
- * 1. Alpha Vantage: FOREX_DAILY/FOREX_INTRADAY エンドポイント
- *    https://www.alphavantage.co/documentation/
- *
- * 2. Twelve Data: /quote, /time_series エンドポイント
- *    https://twelvedata.com/docs
- *
- * 3. Yahoo Finance（非公式）: yahoofinancejs等のライブラリを使用
- *
- * 4. 自作バックエンドAPI: Next.js API Routes (src/app/api/) 経由
- *
- * @throws {Error} API接続失敗時
- */
-async function fetchLiveData(): Promise<{
-  marketData: MarketData;
-  timeframeTrends: TimeframeTrend[];
-}> {
-  // TODO: 実装例
-  // const response = await fetch('/api/market-data');
-  // if (!response.ok) throw new Error(`API error: ${response.status}`);
-  // const json = await response.json();
-  // return transformApiResponse(json);
-
-  throw new Error(
-    "実APIは未実装です。.envのNEXT_PUBLIC_USE_DUMMY_DATA=trueでダミーデータを使用してください。"
-  );
 }
 
 // ---------------------------------------------------------------
@@ -201,21 +206,3 @@ async function fetchLiveData(): Promise<{
 function simulateDelay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
-// ---------------------------------------------------------------
-// API Route のスケルトン（将来: src/app/api/market-data/route.ts）
-// ---------------------------------------------------------------
-//
-// export async function GET() {
-//   try {
-//     const [xauusd, dxy, us10y] = await Promise.all([
-//       fetchXauusd(),
-//       fetchDxy(),
-//       fetchUs10y(),
-//     ]);
-//
-//     return Response.json({ xauusd, dxy, us10y });
-//   } catch (error) {
-//     return Response.json({ error: 'fetch failed' }, { status: 500 });
-//   }
-// }

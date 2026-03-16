@@ -12,6 +12,8 @@ import Notifications from "./Notifications";
 interface Props {
   data: AnalysisResult;
   isLoading?: boolean;
+  dataSource?: "live" | "dummy" | "partial" | null;
+  apiWarning?: string;
   onRefresh?: () => void;
 }
 
@@ -25,7 +27,7 @@ function LoadingSkeleton() {
   );
 }
 
-export default function Dashboard({ data, isLoading = false, onRefresh }: Props) {
+export default function Dashboard({ data, isLoading = false, dataSource, apiWarning, onRefresh }: Props) {
   if (isLoading) {
     return (
       <div className="min-h-screen bg-chart-bg p-4">
@@ -56,17 +58,23 @@ export default function Dashboard({ data, isLoading = false, onRefresh }: Props)
           </div>
 
           <div className="flex items-center gap-3">
-            {/* ライブ/デモ表示 */}
+            {/* データソース表示 */}
             <div className="flex items-center gap-1.5">
               <span
                 className={`w-2 h-2 rounded-full ${
-                  data.marketData.isLive
+                  dataSource === "live"
                     ? "bg-bull animate-pulse"
+                    : dataSource === "partial"
+                    ? "bg-wait animate-pulse"
                     : "bg-chart-muted"
                 }`}
               />
               <span className="text-[11px] font-mono text-chart-muted">
-                {data.marketData.isLive ? "LIVE" : "DEMO"}
+                {dataSource === "live"
+                  ? "LIVE"
+                  : dataSource === "partial"
+                  ? "PARTIAL"
+                  : "DEMO"}
               </span>
             </div>
 
@@ -82,6 +90,18 @@ export default function Dashboard({ data, isLoading = false, onRefresh }: Props)
           </div>
         </div>
       </header>
+
+      {/* APIエラー警告バナー（フォールバック時） */}
+      {apiWarning && (
+        <div className="bg-wait-bg border-b border-wait-border px-4 py-2">
+          <div className="max-w-5xl mx-auto flex items-center gap-2">
+            <span className="text-wait text-xs flex-shrink-0">⚠</span>
+            <p className="text-[11px] text-wait font-mono leading-relaxed">
+              {apiWarning}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* メインコンテンツ */}
       <main className="max-w-5xl mx-auto px-4 py-4 space-y-4">
@@ -118,7 +138,12 @@ export default function Dashboard({ data, isLoading = false, onRefresh }: Props)
         {/* フッター */}
         <footer className="text-center py-4 border-t border-chart-border">
           <p className="text-[10px] text-chart-muted font-mono">
-            XAUUSD Trading Assistant MVP v0.1 — ダミーデータ動作中
+            XAUUSD Trading Assistant MVP v0.1 —{" "}
+            {dataSource === "live"
+              ? "Twelve Data API 接続中"
+              : dataSource === "partial"
+              ? "一部ダミーデータ併用中"
+              : "ダミーデータ動作中"}
           </p>
           <p className="text-[10px] text-chart-muted font-mono mt-1">
             ※ このツールは情報提供のみを目的としており、投資助言ではありません。
